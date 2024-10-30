@@ -1,0 +1,809 @@
+---
+title: "TMDB Movies Regression Analysis"
+output: html_document
+date: "2024-10-05"
+---
+
+
+Dataset downloaded from: https://www.kaggle.com/datasets/tmdb/tmdb-movie-metadata
+```{r}
+#We want to predict how much money a movie has made from the predictor variables in this dataset
+credits = read.csv("C:/Users/ryne0/Downloads/tmdb_5000_credits.csv")
+movies = read.csv("C:/Users/ryne0/Downloads/tmdb_5000_movies.csv")
+```
+
+
+
+
+
+
+Data Cleaning
+```{r}
+colnames(movies)
+#Showing a row of the data
+movies[1,]
+
+#Based on the column names as well as the structure of the columns' data, we decide to remove some columns as their inclusion wouldn't improve predictions.
+
+movies = subset(movies, select = -c(overview, homepage, tagline))
+
+
+
+#Checks if the original title matches the title that the movie was published with
+#1 if the original title does match, 0 if it doesn't
+
+
+movies$same_title = ifelse(movies$title == movies$original_title, 1, 0)
+movies = subset(movies, select = -c( original_title))
+num_rows_include_NA = nrow(movies)
+
+
+#Dropping any rows that have NA values
+movies = movies[complete.cases(movies),]
+num_rows_no_NA = nrow(movies)
+
+print(paste0("The number of rows that were removed due to containing NA values were ", num_rows_include_NA - num_rows_no_NA))
+
+
+#Date is in character form, need to change it to Date form
+movies$release_date = as.Date(movies$release_date)
+
+
+
+not_matching_rows = movies[movies$title != movies$original_title,]
+#not_matching_rows[,c(6,15)]
+
+na_rows = movies[!complete.cases(movies),]
+```
+
+
+
+
+Functions to clean data further
+```{r}
+library(stringr)
+#Transform the production_countries column into a count of the number of countries the movie was filmed in. 
+#It is thought that the more countries a movie is filmed the better the movie may perform in the box office, due to it having settings which are more scenic and appealing to a wider audience.
+
+
+
+num_production_countries = function(movies_dataset){
+  #The production_countries column in the dataset is clean and formatted in set notation, where the countries involved in the film's production are enclosed within curly brackets {}. So the number of these brackets plus one will be the number of countries that were filmed in
+  
+  
+  #Preallocate the vector to make filling it more efficient 
+  production_countries_count = rep(0, nrow(movies_dataset))
+  
+  
+  for (i in seq_along(movies_dataset$production_countries))
+    
+    #Counting the number of occurrences of {
+    production_countries_count[i] =  str_count(movies_dataset$production_countries[i], "\\{")
+  
+  
+  #Add the count as a new column
+  movies_dataset$production_countries_new = production_countries_count
+  return(movies_dataset)
+}
+
+
+
+movies = num_production_countries(movies)
+
+
+
+#Removing the keywords column because there are too many unique phrases for our model to account for, and that the phrases vary significantly in topic and description.
+movies = subset(movies, select = -keywords)
+
+
+
+#Tells us whether the movie was originally in English or not. It is hypothesized that English speaking movies will perform better since English is the most known language in the world.
+movies$is_english_movie = ifelse(movies$original_language=="en", 1, 0)
+
+
+#Also remove production_countries and spoken_languages since they are no longer needed
+movies = subset(movies, select = -c(spoken_languages, production_countries, original_language)) 
+
+
+
+
+
+
+#Values of 1 will be assigned to action and adventure movies
+#2 will be given to drama, comedy and horror
+#3 will be thriller and romantic comedy movies
+#and 4 will be all the rest
+
+#This decision is supported by data from box office revenue on movies, such as at the following link:
+#https://www.statista.com/statistics/188658/movie-genres-in-north-america-by-box-office-revenue-since-1995/
+
+categorize_movies_by_genre = function(movies_dataset) {
+  
+  #Preallocate the vector to make filling it more efficient 
+  genre_type = rep(0, nrow(movies_dataset)) 
+  
+  
+  #If a movie has multiple genres, it will be assigned the value of the genre which gives it the lowest number 
+  for (i in seq_along(movies_dataset$genres)) {
+    
+    if (grepl("Action|Adventure", movies_dataset$genres[i])) 
+      genre_type[i] = 1
+    
+    else if (grepl("Drama|Comedy|Horror", movies_dataset$genres[i])) 
+      genre_type[i] = 2
+    
+    else if (grepl("Thriller|Romantic Comedy", movies_dataset$genres[i])) 
+      genre_type[i] = 3
+    
+    else 
+      genre_type[i] = 4
+    
+  }
+  
+  movies_dataset$genre_type = genre_type
+  return(movies_dataset)
+}
+
+
+
+movies = categorize_movies_by_genre(movies)
+
+
+#Drop the genres column since it is not needed for predicting anymore
+movies = subset(movies, select = -genres)
+
+
+library(ggplot2)
+library(lubridate)
+
+
+
+movies$year = year(movies$release_date)
+
+#Plot histogram of release years
+ggplot(movies, aes(x = year)) +
+  geom_histogram(binwidth = 1, fill = "skyblue", color = "black") +
+  labs(title = "Distribution of Movies by Release Year",
+       x = "Year",
+       y = "Frequency") +
+  theme_minimal()
+```
+
+
+
+
+Adjusting data for inflation
+```{r}
+hist(movies$year, col="blue", main="Histogram of Movies by Release Year", xlab="Year")
+
+
+#Gets the oldest and newest movie in the dataset 
+movies[movies$year== min(movies$year, na.rm = TRUE),][,15]
+movies[movies$year== max(movies$year, na.rm = TRUE),][,15]
+
+
+#From the histogram and the lines of code above, we see that the dataset includes movies from 1916 to 2017. 
+
+
+plot(movies$year, movies$revenue, pch=19, main = "Plot of Movie Revenue and Release Year", xlab = "Year", ylab = "Revenue")
+
+
+
+#We also see from the plot above that the most profitable movie according to the dataset was Avatar, as evidenced by the following query.
+movies[movies$revenue== max(movies$revenue, na.rm = TRUE),][,c(6,9)]
+
+
+#But from the internet, we know that Gone with the Wind was the most profitable movie of all time, when adjusted for inflation, and it is in our dataset.
+movies[movies$title== "Gone with the Wind",][,c(6,9)]
+
+
+
+#So we now know that the dataset does not adjust movie revenue for inflation, and because of this, we will adjust movie revenue by inflation ourselves by converting the revenue gained to how much it would be in 2023.
+
+
+
+#CPI dataset copy and pasted from:   https://www.usinflationcalculator.com/inflation/consumer-price-index-and-annual-percent-changes-from-1913-to-2008/
+
+CPI = read.table("C:/Users/ryne0/Downloads/CPI 1913 to 2023.txt", sep = "\t", header = TRUE)
+
+
+#Showing what the dataset looks like. Note that it goes from 1913 to 2023, inclusive.
+CPI[1,]
+
+#We will be using the Avg column to scale our Revenue column to its worth in 2023.
+
+
+
+
+adjust_for_inflation = function(year_and_revenue_dataset, money_column_name, year_column_name, CPI_dataset, new_col_name){
+  #Shortening the name to make the code more readable
+  yard = year_and_revenue_dataset
+  
+  
+  #Have to remove NA values in year and revenue columns before running, otherwise ane error occurs
+  yard = yard[!is.na(yard[[money_column_name]]) & !is.na(yard[[year_column_name]]), ]
+  
+  
+  #Gets the CPI for 2023
+  CPI_2023 = CPI_dataset[CPI_dataset$Year==2023, 14]
+  
+  
+  
+  
+  
+  adjusted_revenue_2023 = mapply(function(money, year) 
+    {
+      CPI_year = CPI_dataset[CPI_dataset$Year == year, 14]
+      money * (CPI_2023 / CPI_year)
+    }, 
+    yard[[money_column_name]], yard[[year_column_name]])
+  
+  
+  #Adding the adjusted revenue to the dataset
+  yard[[new_col_name]] = unlist(adjusted_revenue_2023)
+  
+  return(yard)
+}
+
+
+
+
+table(movies$revenue)[1:50]
+#Before we adjust for inflation, we see that there a lot of movies with their revenues as 0, presumably from being not recorded, and observe that some movies possess suspiciously low budgets as well. 
+#To rectify this, we will remove movies with revenue lower than $100, since they are likely data entry mistakes.
+
+
+#$1000 was picked to account for older movies appearing to earn less because of inflation.
+
+
+#Removing movies with earnings less than $1000
+movies = movies[movies$revenue>=1000,]
+
+
+#We now adjust our revenue column for inflation
+movies = adjust_for_inflation(movies, "revenue", "year", CPI, "adjusted_revenue")
+
+#Remove revenue since it is now scaled for inflation
+movies = subset(movies, select = -revenue)
+
+
+#Showing the budgets after we have adjusted it for inflation
+plot(movies$year, movies$adjusted_revenue, pch=19, main = "Plot of Movie Revenue Adjusted for Inflation and Release Year", xlab = "Year", ylab = "Revenue in 2023 USD")
+```
+
+
+
+More Cleaning
+```{r}
+#Removing movies with budgets less than $1000, for the same reason we removed movies with revenues of less than $1000
+movies = movies[movies$budget>=1000,]
+movies = adjust_for_inflation(movies, "budget", "year", CPI, "adjusted_budget")
+
+
+
+#Remove budget since we have adjusted the inflation for it
+movies = subset(movies, select = -budget)
+
+
+movies[movies$status!="Released",]
+#Only one movie whose status is not "Released". Remove that movie and remove the 'status' column as it won't give us information for our model.
+
+
+movies = movies[movies$status=="Released",]
+movies = subset(movies, select = -status)
+
+
+
+
+#Remove the id column since it is not relevant to us
+movies = subset(movies, select = -id)
+
+
+
+#Convert production_companies column into a boolean. The new column will be 1 if the movie was made by 1 or more major film studio.
+
+#Rationale: It is thought that because the major film studios are reputable, experienced in film making, and have extensive distribution networks, that a movie produced by such a studio would perform better in sales because of better and increased marketing and theatre showtimes. 
+
+
+
+#These are the names of the major studios in the dataset. Major film studios were identified from Wikipedia: https://en.wikipedia.org/wiki/Major_film_studios#
+#Will be including all present and past major studios
+
+major_film_studio_names = c("Twentieth Century Fox Film Corporation", "Walt Disney Pictures", "Warner Bros.", "Sony Pictures Entertainment", "Paramount Pictures", "United Artists", "Metro-Goldwyn-Mayer", "RKO", "Universal Pictures", "New Line Cinema", "20th Century Studios", "Columbia Pictures", "TriStar Pictures")
+
+
+
+
+is_made_by_major_studio = function(dataset, major_studios, studio_column){
+
+  # Apply the function to check for each row
+  is_made = sapply(dataset[[studio_column]], function(studio_data) {
+
+    
+    #These lines before the ifelse statement are necessary because the production_companies is saved in a json format which is incompatible with default string detection in R. 
+    #ChatGPT begins
+    
+    # Parse the studio data, assuming it's in a JSON-like format
+    studios <- tryCatch(fromJSON(studio_data), error = function(e) NULL)
+    
+    # Extract studio names if parsing was successful, otherwise fallback to raw data
+    if (!is.null(studios) && "name" %in% names(studios)) {
+      studio_names <- studios$name  # Extract the studio names
+    } 
+    else 
+        #Use raw data if parsing fails
+        studio_names <- as.character(studio_data)  
+    
+    #ChatGPT ends
+    
+    
+    #paste turns the major_studios vector into a single string separated by |
+    ifelse(any(grepl(paste(major_studios, collapse = "|"), studio_names)), 1, 0)
+
+  })
+  
+  # Add a new column to the dataset
+  dataset$made_by_major_studio = is_made
+  
+  return(dataset)
+}
+
+
+#Have to coerce production_companies to be a string, otherwise an error would occur when calling it into is_made_by_major_studio
+movies$production_companies = as.character(movies$production_companies)
+
+
+
+movies = is_made_by_major_studio(movies, major_film_studio_names, "production_companies")
+table(movies$same_title)
+
+
+#Drop the production companies column now that transformed it into a predictor variable.
+movies = subset(movies, select = -production_companies)
+
+
+
+
+hist(movies$popularity)
+movies[movies$popularity==max(movies$popularity),]
+
+
+movies[movies$popularity==max(movies$popularity),]
+
+
+
+movies[order(-movies$popularity), ][c(1:20),c(1,4,11)]
+#We observe that modern movies tend to have a higher popularity than older ones. This is because the method TMDB uses to calculates popularity favours giving modern movies a larger score, because of recently available metrics such as social media activity and number of visits to the TMDB website for that movie. 
+#Because of this confounding variable, we will not be using popularity.
+
+
+#And because vote_count skews the total number of votes to favour newer movies, we will not be using vote_count either
+
+
+movies = subset(movies, select=-c(popularity, vote_count))
+#The data cleaning is now finished! 
+```
+
+
+
+
+Building Functions to Check Assumptions
+```{r}
+outlier_removal = function(dataset, outlier_column){
+  
+  #oc means outlier column
+  oc = dataset[[outlier_column]]
+  
+  
+  #Getting the first and third quartiles for our outlier column
+  oc_Q1 = quantile(oc, 0.25)
+  oc_Q3 = quantile(oc, 0.75)
+
+  
+  #Gets the interquartile range
+  oc_IQR = oc_Q3 - oc_Q1
+    
+    
+  #Determine the outlier bounds
+  oc_lower_bound = oc_Q1 - 1.5 * oc_IQR
+  oc_upper_bound = oc_Q3 + 1.5 * oc_IQR
+    
+  
+  #Removes the outliers from our dataset
+  dataset = dataset[oc >= oc_lower_bound & oc <= oc_upper_bound,]
+  
+  
+  return(dataset)
+}
+
+
+#remove_outliers is a boolean
+#trans_val is short for transformation value
+check_regression_assumptions = function(dataset_regression, response_var, remove_outliers, trans_val){
+
+  #Removes outliers when set to true. Removes outliers from both the predictor variable(s) and the response variable
+  if (remove_outliers){
+    for(i in 1:ncol(dataset_regression)){
+      dataset_regression = outlier_removal(dataset_regression, names(dataset_regression)[i])
+    }
+  }
+  
+  response = dataset_regression[[response_var]]
+  
+  
+  
+  #Runs true if there is only one predictor
+  if (ncol(dataset_regression) == 2) {
+    dataset_no_response = dataset_regression[ , !(names(dataset_regression) %in% response_var)]
+    
+    
+    if (is.vector(dataset_no_response)) {
+      predictor_name = names(dataset_regression)[names(dataset_regression) != response_var]
+      
+      #In this line of code, dataset_no_response is a vector because there was only one predictor
+      dataset_no_response = setNames(data.frame(dataset_no_response), predictor_name)
+    }
+  } 
+  else {
+    dataset_no_response = dataset_regression[ , !(names(dataset_regression) %in% response_var)]
+  }
+  
+  
+  for(i in 1:ncol(dataset_no_response)){
+    
+    #Gets the name of the predictor variable
+    x_axis_name = names(dataset_no_response)[i]
+    
+    
+    
+    #Runs if we want to remove outliers. Changes the names of the plots
+    if (remove_outliers){
+      scatterplot_name = paste0("Plot of ",response_var," vs ", x_axis_name, " Without Outliers")
+      residual_plot_name = paste0("Residuals vs Fitted Values for ",response_var," vs ", x_axis_name, " Without Outliers")
+      
+      histogram_name = paste0("Histogram of the Residuals for ",response_var," vs ", x_axis_name, " Without Outliers")
+      qqnorm_name = paste0("Normal Q-Q plot of the Residuals for ",response_var," vs ", x_axis_name, " Without Outliers")
+    }
+    
+    
+    else{
+      scatterplot_name = paste0("Plot of ",response_var," vs ", x_axis_name, " With Outliers")
+      residual_plot_name = paste0("Residuals vs Fitted Values for ",response_var," vs ", x_axis_name, " With Outliers")
+      
+      histogram_name = paste0("Histogram of the Residuals for ",response_var," vs ", x_axis_name, " With Outliers")
+      qqnorm_name = paste0("Normal Q-Q plot of the Residuals for ",response_var," vs ", x_axis_name, " With Outliers")
+      
+    }
+    
+    predictor = dataset_no_response[,i]
+    
+    
+    #Making our simple linear model
+    if (is.na(trans_val))
+      linear_model = lm(response~predictor)
+    
+    else
+      linear_model = lm(response^trans_val~predictor)
+    
+    
+    
+    #Scatterplot of the response vs the predictor variable with the least squares line
+    plot(predictor, response, col = 10*i, main = scatterplot_name, xlab = x_axis_name, ylab = response_var)
+    abline(linear_model, col="black")
+    
+    
+    #Residuals Plot
+    plot(linear_model$fitted.values, linear_model$residuals, xlab="Fitted values", ylab = "Residuals", main = residual_plot_name)
+    
+    
+    #Histogram plot
+    hist(linear_model$residuals, main = histogram_name, xlab = "Residuals")
+    
+    
+    #qqnorm plot
+    qqnorm(linear_model$residuals, main = qqnorm_name, ylab="Residuals")
+    qqline(linear_model$residuals)
+  }
+}
+```
+
+
+
+We will only predict for continuous predictors first. Models involving categorical predictors will be included later.
+
+
+
+Checking Assumptions
+```{r}
+library(dplyr)
+colnames(movies)
+#Extract the numerical variables out of the dataset to predict for adjusted_revenue
+movies_regression = movies[,c(2,4,10,11)]
+
+
+#Rename these columns to make title of plots more readable
+movies_regression = movies_regression %>%
+  rename("adj_rev" = adjusted_revenue, "adj_bud" = adjusted_budget)
+
+
+
+check_regression_assumptions(movies_regression, "adj_rev", F, NA)
+#We observe that most of the plots, which we use to check the assumptions of regression, are significantly distorted for when we don't remove outliers from our dataset. To better understand if the simple linear models follow the assumptions of regression, we will remove the outliers from out data and make the plots again
+
+
+check_regression_assumptions(movies_regression, "adj_rev", T, NA)
+#The following comments are for the plots without outliers.
+
+
+#From the Normal Q-Q plots, we observe that: the residuals are above the line at the beginning and end of the data for variables runtime and vote_average; and that the residuals are right-skewed for adjusted_budget.
+#We also see from the Residuals vs Fitted Values plots that the residuals appear to be trending downwards.
+
+#For each predictor variable, at least one of the assumptions of regression is violated. But we can still apply transformations to the data, which can hopefully cause one or more predictors to follow each assumption. 
+
+
+#We will be applying a cube root transformation to runtime and vote average because it is heavy on the tails
+```
+
+
+
+
+Using the box-cox method the data to fit regression assumptions
+```{r}
+#fotv stands for find optimal transformation value
+#lower limit and upper limit are the limits for our transformation
+
+fotv <- function(lower_limit, upper_limit, increment, dataset_regression, response_var) {
+  
+  # Ensure dataset_regression is a dataframe
+  if (!is.data.frame(dataset_regression)) {
+    stop("Error: dataset_regression must be a dataframe.")
+  }
+
+  # Check if the response variable exists in the dataset
+  if (!response_var %in% colnames(dataset_regression)) {
+    stop("Error: Response variable not found in dataset.")
+  }
+
+  dataset_no_response <- dataset_regression[, !(names(dataset_regression) %in% response_var)]
+  
+  # Loop through each predictor variable to generate Box-Cox plots
+  for (i in 1:ncol(dataset_no_response)) {
+    predictor_name <- names(dataset_no_response)[i]
+    
+    print(paste("Predictor:", predictor_name))  # Debug print
+
+    # Dynamically create the formula
+    formula <- as.formula(paste(response_var, "~", predictor_name))
+    
+    print(paste("Formula:", formula))  # Debug print
+
+    # Run linear model with explicit environment and data passing
+    linear_model <- lm(formula, data = dataset_regression, x = TRUE, y = TRUE, qr = TRUE)
+    
+    print("Linear model created successfully.")  # Debug print
+
+    # Create the plot title
+    plot_title <- paste("Box-Cox for", response_var, "vs", predictor_name, "Without Outliers")
+
+    # Perform Box-Cox transformation with a title
+    boxcox(linear_model, lambda = seq(lower_limit, upper_limit, increment))
+    title(main = plot_title)
+  }
+}
+
+
+
+
+library("MASS")
+fotv(-1, 1, 0.1, movies_regression, "adj_rev")
+#From the plots, we observe that the optimal values for run_time and vote_average are 1/6. When comparing these variables with adj_rev, we will be applying a transformation of 1/6 to the response.
+#We also see that the optimal value for adj_bud is 1/4, so we will be applying a transformation of 1/4 to the adj_rev when comparing it with adj_bud. 
+
+
+
+movies_sixth_root = subset(movies_regression, select=-adj_bud)
+movies_fourth_root = subset(movies_regression, select=-c(runtime, vote_average))
+
+
+
+check_regression_assumptions(movies_sixth_root, "adj_rev", T, 1/6)
+check_regression_assumptions(movies_fourth_root, "adj_rev", T, 1/4)
+#As we can see from the plots, the relationship between our predictor variables and adj_rev has significantly improved!
+
+#We can see from the plots that the variance is constant for both runtime and vote_average, and that the errors are independent.
+#For these variables, the normality of the residuals is more open to interpretation as the tails deviate somewhat from the line in the Q-Q plot. But because the vast majority of the points fall on or close to the line, it is acceptable to say that the normality assumption for the residuals has been met.
+
+
+#For adj_bud, there appears to be a somewhat of a funneling in the residuals, especially towards the top part of the Residuals vs Fitted plot. 
+
+#Because of this, we won't be using adj_bud given that it violates the constant variance assumption.
+```
+
+Comments:
+From here we have two options:
+We can remove adj_bud and have a model with only the predictor variables vote_average and runtime. Or, we can keep adj_bud, and see if its assumptions become satisfied in the full model with all predictors.
+
+We will test both options separately.
+
+
+
+
+
+
+Building functions to make models
+```{r}
+train_test = function(movies_data){
+  
+  #t_t is short for train_test
+  t_t_indices = sample(seq_len(nrow(movies_data)), size = 0.7 * nrow(movies_data))
+  
+  train_data = movies_data[t_t_indices, ]
+  test_data = movies_data[-t_t_indices, ]
+  
+  return(list(training_data = train_data, testing_data = test_data))
+}
+
+
+#mrm stands for multiple regression models
+mrm_generator = function(movies_data, response_var, predictor_formula, remove_outliers){
+  
+  #t_t is short for train_test
+  t_t_data = train_test(movies_data)
+  
+  
+  formula = as.formula(paste(response_var, "~", predictor_formula))
+  print(formula)
+  
+  mrm = lm(formula, data = t_t_data$training_data)
+
+  
+  #Removing outliers by first running the original one
+  if(remove_outliers){
+    influencers = influence.measures(mrm)
+    influential_rows = which(influencers$is.inf[, "hat"])
+
+
+    #Removing the influential points to improve our model
+    t_t_data$training_data = t_t_data$training_data[-influential_rows, ]
+    mrm = lm(formula, data = t_t_data$training_data)
+  }
+  
+  predictions = predict(mrm, newdata = t_t_data$testing_data)
+  
+  #Gets the root MSE
+  rmse = sqrt(mean((t_t_data$testing_data[[response_var]] - predictions)^2))
+  
+  
+  return(list(rmse = rmse, model = mrm))
+}
+
+#Shows the model's summary, and rsq and rmse values 
+model_comparison = function(given_model){
+  
+  model_summary = summary(given_model$model)
+  print(model_summary)
+  
+  
+  print(given_model$rmse)
+  print(model_summary$r.squared)
+}
+```
+
+
+
+Option 1:
+
+Our model has the formula:  
+$$ y^{1/4} = \beta_0 + \beta_{1} x_{va} + \beta_{2} x_{rt} + \epsilon $$
+Where va stands for vote_average and rt stands for runtime.
+
+No interaction term will be made between vote_average and runtime because the two are intuitively independent from each other.
+```{r}
+#Removing adjusted_budget.
+#opt1 means option1
+movies_regression_opt1 = subset(movies_regression, select = -adj_bud)
+
+
+#Taking the fourth root of adj_rev, our response variable
+movies_regression_opt1[,3] = movies_regression_opt1[,3]^(1/4)
+
+
+opt1 = mrm_generator(movies_regression_opt1, "adj_rev", "runtime + vote_average", F)
+plot(opt1$model)
+
+
+
+#We observe from the plots of opt1 that there are outliers.
+#Let us remove the outliers in our response and predictor to try to create a better model
+opt1_no_outlier = mrm_generator(movies_regression_opt1, "adj_rev", "runtime + vote_average", T)
+
+
+
+model_comparison(opt1); model_comparison(opt1_no_outlier)
+```
+We observe that the $$r^2$$ value for the original model is higher, and the rmse (root mean squared error) value is lower for the original model. Because of this, we conclude that the original model is better than the newer one.
+
+
+
+
+Option 2:
+
+Interaction terms will be created between vote_average and adj_bud, and runtime and adj_bud for the following reasons:
+
+There may be a relationship between a movie's rating and its budget, with higher budget movies being thought to produce a movie rating. 
+It is thought that the longer a movie is, the larger its budget needs to be, generally speaking. 
+
+
+Our model has the formula:  
+$$ y^{1/4} = \beta_0 + \beta_{1} x_{va} + \beta_{2} x_{rt} + \beta_{3} x^{2/3}_{ab}+ \beta_{4} x_{va}x^{2/3}_{ab}+ \beta_{5} x_{rt}x^{2/3}_{ab}+ \epsilon $$
+Where va stands for vote_average, rt stands for runtime, and ab stands for adj_bud.
+
+
+```{r}
+#Stating the code for consistency
+movies_regression_opt2 = movies_regression
+
+
+#Taking the fourth root of adj_rev, our response variable
+movies_regression_opt2[,3] = movies_regression_opt2[,3]^(1/4)
+movies_regression_opt2[,4] = movies_regression_opt2[,4]^(2/3)
+
+
+
+opt2_predictor_formula = "runtime + vote_average + adj_bud + vote_average:adj_bud + runtime:adj_bud"
+opt2 = mrm_generator(movies_regression_opt2, "adj_rev", opt2_predictor_formula, F)
+plot(opt2$model)
+
+
+#We observe from the plots of opt2 that there are outliers, similar to opt1.
+#Let us remove the outliers in our response and predictor to try to create a better model
+opt2_no_outlier = mrm_generator(movies_regression_opt2, "adj_rev", opt2_predictor_formula, T)
+
+
+
+model_comparison(opt2); model_comparison(opt2_no_outlier)
+
+
+
+#We see that including adj_bud has significantly improved our model, resulting in a higher r^2 value and a lower RMSE value for when outliers are both removed and retained. 
+
+#Because the model which excludes outliers has a lower RMSE value, we will use it as our final model.
+#But we must check that it satisfies all the assumptions of regression to ensure that we can safely use it.
+
+
+
+#Getting only the residual plot
+plot(opt2_no_outlier$model, which = 1)
+
+#Examining the histogram for normality of the residuals
+hist(residuals(opt2_no_outlier$model), main = "Histogram of Residuals", xlab = "Residuals")
+
+#The plot of the residuals and the histogram of residuals shows that all the assumptions of regression are satisfied. The variance is constant, and the residuals are independent and normal.
+```
+
+
+
+We observed that the p-value of adj_bud was very high, at 0.7213. The code below will determine if removing adj_bud as a predictor will improve our model.
+```{r}
+opt2_predictor_formula = "runtime + vote_average + vote_average:adj_bud + runtime:adj_bud"
+opt2_no_outlier_no_adj_bud = mrm_generator(movies_regression_opt2, "adj_rev", opt2_predictor_formula, T)
+model_comparison(opt2_no_outlier_no_adj_bud)
+
+#We see that the RMSE and r squared values both increased. But because the increase in r squared is so low and the RMSE value increased, we will keep adj_bud in our final model for better model accuracy. 
+```
+
+
+
+
+Comments to self:
+Model formula technically isn't linear. Revisit the wording later.
+
+
+
+
+#Might have to account for the dataset potentially holding movies that performed really well in the past, which may skew results
+
+Could compare if movies released in the winter months do better than the summer
+
+
+

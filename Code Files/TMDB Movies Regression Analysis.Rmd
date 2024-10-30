@@ -793,17 +793,3 @@ model_comparison(opt2_no_outlier_no_adj_bud)
 ```
 
 
-
-
-Comments to self:
-Model formula technically isn't linear. Revisit the wording later.
-
-
-
-
-#Might have to account for the dataset potentially holding movies that performed really well in the past, which may skew results
-
-Could compare if movies released in the winter months do better than the summer
-
-
-
